@@ -34,16 +34,16 @@ def build_summaries():
     episode_reward = tf.Variable(0.)
     training_summaries.append(tf.summary.scalar("Reward", episode_reward))
     episode_ave_max_q = tf.Variable(0.)
-    training_summaries.append(tf.summary.scalar("Qmax Value", episode_ave_max_q))
+    training_summaries.append(tf.summary.scalar("Qmax_Value", episode_ave_max_q))
     value_loss = tf.Variable(0.)
-    training_summaries.append(tf.summary.scalar("Value Loss", value_loss))
+    training_summaries.append(tf.summary.scalar("Value_Loss", value_loss))
 
     train_ops = tf.summary.merge(training_summaries)
 
     # Validation variables
     valid_summaries = []
     valid_Reward = tf.Variable(0.)
-    valid_summaries.append(tf.summary.scalar("Validation Rewards", valid_Reward))
+    valid_summaries.append(tf.summary.scalar("Validation_Rewards", valid_Reward))
 
     valid_ops = tf.summary.merge(valid_summaries)
 
@@ -66,7 +66,7 @@ def train(sess, current_step, opt, env, actor, critic, train_ops, training_vars,
     for t in itertools.count():
         # Added exploration noise
         input_s = np.reshape(state, (1, actor.s_dim))
-        a = actor.predict(input_s)
+        # a = actor.predict(input_s)
         a = actor.predict(input_s) + (1. / (1. + current_step))
         '''
         if current_step  < opt.max_exploration_episodes:
@@ -165,8 +165,12 @@ def main(_):
     tf.set_random_seed(opt.seed)
 
     if opt.train:
+        tf_config = tf.ConfigProto()
+        tf_config.gpu_options.allow_growth = True
+        tf_config.gpu_options.allocator_type = 'BFC'
+
         cluster = tf.train.ClusterSpec({"ps":opt.parameter_servers, "worker":opt.workers})
-        server = tf.train.Server(cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
+        server = tf.train.Server(cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index, config=tf_config)
 
         if FLAGS.job_name == "ps":
             server.join()
@@ -178,6 +182,8 @@ def main(_):
                 step_op = global_step.assign(global_step+1)
 
                 env = gym.make(opt.env_name)
+                env = gym.wrappers.FlattenDictWrapper(env, dict_keys=['observation', 'desired_goal'])
+
                 if is_chief:
                     env = wrappers.Monitor(env,'./tmp/',force=True)
 
@@ -234,7 +240,8 @@ def main(_):
                 #sv = tf.train.Supervisor(is_chief=is_chief, global_step=global_step, init_op=init_op, summary_op=None, saver=None, init_fn=restore_model)
 
                 #with sv.prepare_or_wait_for_session(server.target) as sess:
-                with tf.Session(server.target) as sess:
+
+                with tf.Session(server.target, config=tf_config) as sess:
                     sess.run(init_op)
                     restore_model(sess)
 
@@ -271,7 +278,72 @@ def main(_):
 
 
     else:       # For testing
-        pass
+        tf_config = tf.ConfigProto()
+        tf_config.gpu_options.allow_growth = True
+        tf_config.gpu_options.allocator_type = 'BFC'
+
+        cluster = tf.train.ClusterSpec({"ps": opt.parameter_servers, "worker": opt.workers})
+        server = tf.train.Server(cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index, config=tf_config)
+        if FLAGS.job_name == "ps":
+            server.join()
+        elif FLAGS.job_name == "worker":
+            def restore_model(sess):
+                actor.set_session(sess)
+                critic.set_session(sess)
+                saver.restore(sess, tf.train.latest_checkpoint(opt.save_dir + '/'))
+                actor.restore_params(tf.trainable_variables())
+                critic.restore_params(tf.trainable_variables())
+                print('***********************')
+                print('Model Restored')
+                print('***********************')
+
+            is_chief = (FLAGS.task_index == 0)
+            # count the number of updates
+            global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
+            step_op = global_step.assign(global_step + 1)
+
+            env = gym.make(opt.env_name)
+            env = gym.wrappers.FlattenDictWrapper(env, dict_keys=['observation', 'desired_goal'])
+            scaler = None
+
+            # Initialize replay memory
+            replay_buffer = ReplayBuffer(opt.rm_size, opt.seed)
+
+            state_dim = env.observation_space.shape[0]
+            action_dim = env.action_space.shape[0]
+            if abs(env.action_space.low[0]) == abs(env.action_space.high[0]):
+                action_scale = abs(env.action_space.high[0])
+            else:
+                print('Error: Action space in current environment is asymmetric! ')
+                sys.exit()
+
+            actor = ActorNetwork(state_dim, action_dim, action_scale, opt.actor_lr, opt.tau, scaler)
+            critic = CriticNetwork(state_dim, action_dim, opt.critic_lr, opt.tau, actor.get_num_trainable_vars(),
+                                   scaler)
+
+            # Set up summary Ops
+            train_ops, valid_ops, training_vars, valid_vars = build_summaries()
+
+            init_op = tf.global_variables_initializer()
+
+            with tf.Session(server.target, config=tf_config) as sess:
+                sess.run(init_op)
+                restore_model(sess)
+
+                writer = tf.summary.FileWriter(opt.summary_dir, sess.graph)
+
+                stats = []
+                for step in range(opt.max_episodes):
+                    '''
+                    if sv.should_stop():
+                        break
+                    '''
+
+                    current_step = sess.run(global_step)
+                    test_r = test(sess, current_step, opt, env, actor, critic, valid_ops, valid_vars, writer)
+
+                    # Increase global_step
+                    sess.run(step_op)
 
 
 if __name__ == '__main__':
