@@ -200,7 +200,7 @@ def main(_):
                 state_dim = env.observation_space.shape[0]
                 action_dim = env.action_space.shape[0]
                 if abs(env.action_space.low[0]) == abs(env.action_space.high[0]):
-                    action_scale = abs(env.action_space.high[0])
+                    action_scale = abs(env.action_space.high)
                 else:
                     print('Error: Action space in current environment is asymmetric! ')
                     sys.exit()
@@ -276,8 +276,8 @@ def main(_):
                 #sv.stop()
                 print('Done')
 
-
-    else:       # For testing
+    # for testing
+    else:
         tf_config = tf.ConfigProto()
         tf_config.gpu_options.allow_growth = True
         tf_config.gpu_options.allocator_type = 'BFC'
@@ -287,15 +287,6 @@ def main(_):
         if FLAGS.job_name == "ps":
             server.join()
         elif FLAGS.job_name == "worker":
-            def restore_model(sess):
-                actor.set_session(sess)
-                critic.set_session(sess)
-                saver.restore(sess, tf.train.latest_checkpoint(opt.save_dir + '/'))
-                actor.restore_params(tf.trainable_variables())
-                critic.restore_params(tf.trainable_variables())
-                print('***********************')
-                print('Model Restored')
-                print('***********************')
 
             is_chief = (FLAGS.task_index == 0)
             # count the number of updates
@@ -312,7 +303,7 @@ def main(_):
             state_dim = env.observation_space.shape[0]
             action_dim = env.action_space.shape[0]
             if abs(env.action_space.low[0]) == abs(env.action_space.high[0]):
-                action_scale = abs(env.action_space.high[0])
+                action_scale = abs(env.action_space.high)
             else:
                 print('Error: Action space in current environment is asymmetric! ')
                 sys.exit()
@@ -320,6 +311,17 @@ def main(_):
             actor = ActorNetwork(state_dim, action_dim, action_scale, opt.actor_lr, opt.tau, scaler)
             critic = CriticNetwork(state_dim, action_dim, opt.critic_lr, opt.tau, actor.get_num_trainable_vars(),
                                    scaler)
+
+            saver = tf.train.Saver(max_to_keep=5)
+            def restore_model(sess):
+                actor.set_session(sess)
+                critic.set_session(sess)
+                saver.restore(sess, tf.train.latest_checkpoint(opt.save_dir + '/'))
+                actor.restore_params(tf.trainable_variables())
+                critic.restore_params(tf.trainable_variables())
+                print('***********************')
+                print('Model Restored')
+                print('***********************')
 
             # Set up summary Ops
             train_ops, valid_ops, training_vars, valid_vars = build_summaries()
